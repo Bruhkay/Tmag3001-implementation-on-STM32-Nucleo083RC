@@ -45,6 +45,8 @@ COM_InitTypeDef BspCOMInit;
 
 I2C_HandleTypeDef hi2c1;
 
+TIM_HandleTypeDef htim2;
+
 /* USER CODE BEGIN PV */
 
 /* USER CODE END PV */
@@ -53,6 +55,7 @@ I2C_HandleTypeDef hi2c1;
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_I2C1_Init(void);
+static void MX_TIM2_Init(void);
 /* USER CODE BEGIN PFP */
 #include "main.h"
 #include <stdio.h>
@@ -64,34 +67,32 @@ extern I2C_HandleTypeDef hi2c1;
 #define TMAG3001_I2C_ADDR_8BIT (TMAG3001_I2C_ADDR_7BIT << 1)
 
 // TMAG3001 Register Addresses (from datasheet Table 7-1)
-#define TMAG3001_REG_DEVICE_CONFIG_2    0x01 // Added for clarity, as it's Device_Config_1 + 1
+#define TMAG3001_REG_DEVICE_CONFIG_2    0x01
 #define TMAG3001_REG_SENSOR_CONFIG_1    0x02
+
+volatile uint8_t timer_elapsed_flag = 0; // Global flag
 
 
 void read_tmag_data(void) {
     uint8_t raw_data[6];
     // Read all axis data (registers 0x12-0x17)
-    if (HAL_I2C_Mem_Read(&hi2c1, TMAG3001_I2C_ADDR_8BIT, 0x12, 1, raw_data, 6, 100) == HAL_OK) {
-        int16_t x_raw = (raw_data[0] << 8) | raw_data[1];
-        int16_t y_raw = (raw_data[2] << 8) | raw_data[3];
-        int16_t z_raw = (raw_data[4] << 8) | raw_data[5];
-
-        // Convert raw ADC values to milliTeslas (mT)
-		// From datasheet (Section 6.5.2.1, Table 6-8, page 35)
-		// For +/-80mT range (TMAG3001A1), Sensitivity is 446 LSB/mT.
-		// For +/-240mT range (TMAG3001A2), Sensitivity is 137 LSB/mT.
-		// Assuming +/-80mT range (Sensitivity = 446 LSB/mT) based on Sensor_Config_2 = 0x05 (1h for range)
-		// Adjust this 'sensitivity' value based on your actual TMAG3001 variant and configured range.
-		float sensitivity = 446.0f; // LSB/mT for +/-80mT range (TMAG3001A1)
+    if (HAL_I2C_Mem_Read(&hi2c1, TMAG3001_I2C_ADDR_8BIT, 0x10, 1, raw_data, 8, 100) == HAL_OK) {
+        int16_t temp_raw = (raw_data[0] << 8) | raw_data[1];
+        int16_t x_raw = (raw_data[2] << 8) | raw_data[3];
+        int16_t y_raw = (raw_data[4] << 8) | raw_data[5];
+        int16_t z_raw = (raw_data[6] << 8) | raw_data[7];
+        float temp_sensitivity = 58.2 ;
+		float axis_sensitivity = 446.0f; // LSB/mT for +/-80mT range (TMAG3001A1)
 									// Change to 885.0f for +/-40mT (TMAG3001A1)
 									// Change to 273.0f for +/-120mT (TMAG3001A2)
 									// Change to 137.0f for +/-240mT (TMAG3001A2)
 
-		float x_field = (float)x_raw / sensitivity;
-		float y_field = (float)y_raw / sensitivity;
-		float z_field = (float)z_raw / sensitivity;
+		float temp_celcius = 25 + (float)(temp_raw -17512)/ temp_sensitivity; //17512 is the offset, at 25 celcius the value hits 17512
+		float x_field = (float)x_raw / axis_sensitivity;
+		float y_field = (float)y_raw / axis_sensitivity;
+		float z_field = (float)z_raw / axis_sensitivity;
 
-		printf("Magnetic Field (mT): X=%.3f, Y=%.3f, Z=%.3f\r\n", x_field, y_field, z_field);
+		printf("Magnetic Field (mT): X=%.3f, Y=%.3f, Z=%.3f, Temp=%.3f\r\n", x_field, y_field, z_field, temp_celcius);
 
     } else {
         printf("Data read failed\r\n");
@@ -123,7 +124,15 @@ void TMAG3001_ConfigureSensor(void) {
     HAL_Delay(50); // Allow sensor to stabilize after configuration
     printf("TMAG3001 configuration complete.\r\n\r\n");
 }
-
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+    if (htim->Instance == TIM2)
+    {
+        HAL_TIM_Base_Stop_IT(&htim2); //Stop timer
+        BSP_LED_Toggle(LED_GREEN);    //Led lights up when board waking up
+        timer_elapsed_flag = 1;       //Flag for interrupt
+    }
+}
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -161,10 +170,11 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_I2C1_Init();
+  MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
   HAL_Delay(500); // Half second delay at start
 
-  TMAG3001_ConfigureSensor(); // For initialization
+  TMAG3001_ConfigureSensor(); // For initialization of the sensor
 
   /* USER CODE END 2 */
 
@@ -194,8 +204,14 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-	  read_tmag_data(); //reads data from x-y-z registers and prints it
-	  HAL_Delay(500); //Half second delay
+	  //HAL_Delay(500); //Half second delay
+	  HAL_TIM_Base_Start_IT(&htim2); // Start timer for 3 seconds (3 second indicated in .ioc file)
+	  HAL_PWR_EnterSLEEPMode(PWR_LOWPOWERREGULATOR_ON, PWR_SLEEPENTRY_WFI); //Put the system to the sleep mode until interrupt
+	  if (timer_elapsed_flag == 1) {
+		  read_tmag_data();  //reads data from x-y-z registers and prints it
+		  timer_elapsed_flag = 0; // Clear the flag
+	  }
+
   }
   /* USER CODE END 3 */
 }
@@ -284,6 +300,51 @@ static void MX_I2C1_Init(void)
   /* USER CODE BEGIN I2C1_Init 2 */
 
   /* USER CODE END I2C1_Init 2 */
+
+}
+
+/**
+  * @brief TIM2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM2_Init(void)
+{
+
+  /* USER CODE BEGIN TIM2_Init 0 */
+
+  /* USER CODE END TIM2_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM2_Init 1 */
+
+  /* USER CODE END TIM2_Init 1 */
+  htim2.Instance = TIM2;
+  htim2.Init.Prescaler = 63999;
+  htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim2.Init.Period = 1999;
+  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim2, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM2_Init 2 */
+
+  /* USER CODE END TIM2_Init 2 */
 
 }
 
