@@ -70,12 +70,12 @@ extern I2C_HandleTypeDef hi2c1;
 #define TMAG3001_REG_DEVICE_CONFIG_2    0x01
 #define TMAG3001_REG_SENSOR_CONFIG_1    0x02
 
-volatile uint8_t timer_elapsed_flag = 0; // Global flag
+volatile uint8_t timer_elapsed_flag = 0; 
 
 
 void read_tmag_data(void) {
     uint8_t raw_data[6];
-    // Read all axis data (registers 0x12-0x17)
+    // Read registers 0x10-0x17
     if (HAL_I2C_Mem_Read(&hi2c1, TMAG3001_I2C_ADDR_8BIT, 0x10, 1, raw_data, 8, 100) == HAL_OK) {
         int16_t temp_raw = (raw_data[0] << 8) | raw_data[1];
         int16_t x_raw = (raw_data[2] << 8) | raw_data[3];
@@ -121,18 +121,39 @@ void TMAG3001_ConfigureSensor(void) {
         printf("Failed to write Sensor_Config_1!\r\n");
     }
 
-    HAL_Delay(50); // Allow sensor to stabilize after configuration
+    HAL_Delay(50); 
     printf("TMAG3001 configuration complete.\r\n\r\n");
 }
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
     if (htim->Instance == TIM2)
     {
+		printf("Sleep ended. \r\n");
         HAL_TIM_Base_Stop_IT(&htim2); //Stop timer
-        BSP_LED_Toggle(LED_GREEN);    //Led lights up when board waking up
+        BSP_LED_On(LED_GREEN);    //Led lights up when board waking up
         timer_elapsed_flag = 1;       //Flag for interrupt
     }
 }
+
+void TMAG3001_Sleep(void) {
+    uint8_t reg_val = 0x00;  // Power-Down mode
+    if (HAL_I2C_Mem_Write(&hi2c1, TMAG3001_I2C_ADDR_8BIT, TMAG3001_REG_DEVICE_CONFIG_2, I2C_MEMADD_SIZE_8BIT, &reg_val, 1, 100) != HAL_OK) {
+        printf("Failed to put TMAG3001 to sleep!\r\n");
+    } else {
+        printf("TMAG3001 entered sleep mode.\r\n");
+    }
+}
+
+void TMAG3001_Wakeup(void) {
+    uint8_t reg_val = 0x02;  // Continuous Measure Mode
+    if (HAL_I2C_Mem_Write(&hi2c1, TMAG3001_I2C_ADDR_8BIT, TMAG3001_REG_DEVICE_CONFIG_2, I2C_MEMADD_SIZE_8BIT, &reg_val, 1, 100) != HAL_OK) {
+        printf("Failed to wake up TMAG3001!\r\n");
+    } else {
+        printf("TMAG3001 woke up and resumed continuous mode.\r\n");
+    }
+    HAL_Delay(5); 
+}
+
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -205,11 +226,16 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
 	  //HAL_Delay(500); //Half second delay
+	  
 	  HAL_TIM_Base_Start_IT(&htim2); // Start timer for 3 seconds (3 second indicated in .ioc file)
 	  HAL_PWR_EnterSLEEPMode(PWR_LOWPOWERREGULATOR_ON, PWR_SLEEPENTRY_WFI); //Put the system to the sleep mode until interrupt
 	  if (timer_elapsed_flag == 1) {
+		  TMAG3001_Wakeup();
 		  read_tmag_data();  //reads data from x-y-z registers and prints it
 		  timer_elapsed_flag = 0; // Clear the flag
+		  BSP_LED_Off(LED_GREEN);
+		  printf("Sleep process started. \r\n");
+		  TMAG3001_Sleep();
 	  }
 
   }
