@@ -45,6 +45,8 @@ COM_InitTypeDef BspCOMInit;
 
 I2C_HandleTypeDef hi2c1;
 
+RTC_HandleTypeDef hrtc;
+
 TIM_HandleTypeDef htim2;
 
 /* USER CODE BEGIN PV */
@@ -56,6 +58,7 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_TIM2_Init(void);
+static void MX_RTC_Init(void);
 /* USER CODE BEGIN PFP */
 #include "main.h"
 #include <stdio.h>
@@ -70,18 +73,41 @@ extern I2C_HandleTypeDef hi2c1;
 #define TMAG3001_REG_DEVICE_CONFIG_2    0x01
 #define TMAG3001_REG_SENSOR_CONFIG_1    0x02
 
-volatile uint8_t timer_elapsed_flag = 0; 
+volatile uint8_t timer_elapsed_flag = 0;
 
+/**
+ * @brief Prints the current time and date from the RTC.
+ * @retval None
+ */
+void print_timestamp(void) {
+    RTC_TimeTypeDef sTime;
+    RTC_DateTypeDef sDate;
+
+    // Get the RTC current Time and Date
+    HAL_RTC_GetTime(&hrtc, &sTime, RTC_FORMAT_BIN);
+    HAL_RTC_GetDate(&hrtc, &sDate, RTC_FORMAT_BIN);
+
+    // Print the timestamp
+    printf("Timestamp: %02d:%02d:%02d - %02d/%02d/%02d\r\n",
+           sTime.Hours, sTime.Minutes, sTime.Seconds,
+           sDate.Date, sDate.Month, (2025 + sDate.Year));
+}
 
 void read_tmag_data(void) {
-    uint8_t raw_data[6];
+    uint8_t raw_data[14];
     // Read registers 0x10-0x17
-    if (HAL_I2C_Mem_Read(&hi2c1, TMAG3001_I2C_ADDR_8BIT, 0x10, 1, raw_data, 8, 100) == HAL_OK) {
-        int16_t temp_raw = (raw_data[0] << 8) | raw_data[1];
-        int16_t x_raw = (raw_data[2] << 8) | raw_data[3];
-        int16_t y_raw = (raw_data[4] << 8) | raw_data[5];
-        int16_t z_raw = (raw_data[6] << 8) | raw_data[7];
-        float temp_sensitivity = 58.2 ;
+    if (HAL_I2C_Mem_Read(&hi2c1, TMAG3001_I2C_ADDR_8BIT, 0x0D, 1, raw_data, 14, 100) == HAL_OK) {
+
+        int8_t device_ID = (raw_data[0]); // starts from 0x0D and decodes all the raw registers into variables
+        int16_t manufacturer_id = ( raw_data[2]<< 8 | raw_data[1] ) ;
+        int16_t temp_raw = (raw_data[3] << 8) | raw_data[4];
+        int16_t x_raw = (raw_data[5] << 8) | raw_data[6];
+        int16_t y_raw = (raw_data[7] << 8) | raw_data[8];
+        int16_t z_raw = (raw_data[9] << 8) | raw_data[10];
+        int16_t conv = raw_data[11];
+        int16_t angle_raw = (raw_data[12] << 8) | raw_data[13];
+
+        float temp_sensitivity = 58.2 ;  //taken from datasheet
 		float axis_sensitivity = 446.0f; // LSB/mT for +/-80mT range (TMAG3001A1)
 									// Change to 885.0f for +/-40mT (TMAG3001A1)
 									// Change to 273.0f for +/-120mT (TMAG3001A2)
@@ -92,7 +118,10 @@ void read_tmag_data(void) {
 		float y_field = (float)y_raw / axis_sensitivity;
 		float z_field = (float)z_raw / axis_sensitivity;
 
-		printf("Magnetic Field (mT): X=%.3f, Y=%.3f, Z=%.3f, Temp=%.3f\r\n", x_field, y_field, z_field, temp_celcius);
+		float angle_deg = ((float)angle_raw) * 360.0f / 65536.0f;
+
+		printf("Device_ID=0x%04X, Manufacturer ID=0x%04X\r\n", device_ID, manufacturer_id);
+		printf("Magnetic Field (mT): X=%.3f, Y=%.3f, Z=%.3f, Temp=%.3f, Angle=%.3f, Conv=%.3d\r\n", x_field, y_field, z_field, temp_celcius, angle_deg,conv);
 
     } else {
         printf("Data read failed\r\n");
@@ -121,13 +150,15 @@ void TMAG3001_ConfigureSensor(void) {
         printf("Failed to write Sensor_Config_1!\r\n");
     }
 
-    HAL_Delay(50); 
+    HAL_Delay(50);
     printf("TMAG3001 configuration complete.\r\n\r\n");
 }
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
     if (htim->Instance == TIM2)
     {
+    	printf("_________________\r\n");
+    	print_timestamp();
 		printf("Sleep ended. \r\n");
         HAL_TIM_Base_Stop_IT(&htim2); //Stop timer
         BSP_LED_On(LED_GREEN);    //Led lights up when board waking up
@@ -151,7 +182,7 @@ void TMAG3001_Wakeup(void) {
     } else {
         printf("TMAG3001 woke up and resumed continuous mode.\r\n");
     }
-    HAL_Delay(5); 
+    HAL_Delay(5);
 }
 
 /* USER CODE END PFP */
@@ -192,6 +223,7 @@ int main(void)
   MX_GPIO_Init();
   MX_I2C1_Init();
   MX_TIM2_Init();
+  MX_RTC_Init();
   /* USER CODE BEGIN 2 */
   HAL_Delay(500); // Half second delay at start
 
@@ -226,16 +258,21 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
 	  //HAL_Delay(500); //Half second delay
-	  
+
 	  HAL_TIM_Base_Start_IT(&htim2); // Start timer for 3 seconds (3 second indicated in .ioc file)
+
+
 	  HAL_PWR_EnterSLEEPMode(PWR_LOWPOWERREGULATOR_ON, PWR_SLEEPENTRY_WFI); //Put the system to the sleep mode until interrupt
+
 	  if (timer_elapsed_flag == 1) {
+		  printf("Sleep process ended. \r\n");
 		  TMAG3001_Wakeup();
 		  read_tmag_data();  //reads data from x-y-z registers and prints it
+
 		  timer_elapsed_flag = 0; // Clear the flag
 		  BSP_LED_Off(LED_GREEN);
-		  printf("Sleep process started. \r\n");
 		  TMAG3001_Sleep();
+		  printf("Sleep process started. \r\n");
 	  }
 
   }
@@ -258,9 +295,10 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI|RCC_OSCILLATORTYPE_LSI;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  RCC_OscInitStruct.LSIState = RCC_LSI_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
@@ -326,6 +364,44 @@ static void MX_I2C1_Init(void)
   /* USER CODE BEGIN I2C1_Init 2 */
 
   /* USER CODE END I2C1_Init 2 */
+
+}
+
+/**
+  * @brief RTC Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_RTC_Init(void)
+{
+
+  /* USER CODE BEGIN RTC_Init 0 */
+
+  /* USER CODE END RTC_Init 0 */
+
+  /* USER CODE BEGIN RTC_Init 1 */
+
+  /* USER CODE END RTC_Init 1 */
+
+  /** Initialize RTC Only
+  */
+  hrtc.Instance = RTC;
+  hrtc.Init.HourFormat = RTC_HOURFORMAT_24;
+  hrtc.Init.AsynchPrediv = 127;
+  hrtc.Init.SynchPrediv = 255;
+  hrtc.Init.OutPut = RTC_OUTPUT_DISABLE;
+  hrtc.Init.OutPutRemap = RTC_OUTPUT_REMAP_NONE;
+  hrtc.Init.OutPutPolarity = RTC_OUTPUT_POLARITY_HIGH;
+  hrtc.Init.OutPutType = RTC_OUTPUT_TYPE_OPENDRAIN;
+  hrtc.Init.OutPutPullUp = RTC_OUTPUT_PULLUP_NONE;
+  hrtc.Init.BinMode = RTC_BINARY_NONE;
+  if (HAL_RTC_Init(&hrtc) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN RTC_Init 2 */
+
+  /* USER CODE END RTC_Init 2 */
 
 }
 
